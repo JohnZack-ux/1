@@ -1,0 +1,506 @@
+import re
+from collections import namedtuple
+from typing import List, Union, Optional
+from c_lexer import CLexer, Token
+
+# AST Node type definitions using named tuples
+ASTNode = namedtuple('ASTNode', ['type', 'value'], defaults=[None, None])
+
+# Specialized AST node constructors for clarity
+def binary_op(op: str, left, right):
+    return ('BINARY', op, left, right)
+
+def unary_op(op: str, operand):
+    return ('UNARY', op, operand)
+
+def assign_op(op: str, target, value):
+    return ('ASSIGN', op, target, value)
+
+def conditional_op(cond, true_branch, false_branch):
+    return ('CONDITIONAL', cond, true_branch, false_branch)
+
+def subscript_op(array_ref, index_expr):
+    return ('SUBSCRIPT', array_ref, index_expr)
+
+def primary_id(name: str):
+    return ('ID', name)
+
+def primary_number(value: str):
+    return ('NUMBER', value)
+
+
+class CExpressionParser:
+    """
+    Recursive Descent Parser for C expressions.
+    
+    Priority levels (lowest to highest):
+     1. Comma (,) - left-associative
+     2. Assignment (=, +=, -=, *=, /=, %=, <<=, >>=, &=, ^=, |=) - right-associative
+     3. Conditional (?:) - right-associative
+     4. Logical OR (||) - left-associative
+     5. Logical AND (&&) - left-associative
+     6. Bitwise OR (|) - left-associative
+     7. Bitwise XOR (^) - left-associative
+     8. Bitwise AND (&) - left-associative
+     9. Equality (==, !=) - left-associative
+    10. Relational (<, <=, >, >=) - left-associative
+    11. Shift (<<, >>) - left-associative
+    12. Additive (+, -) - left-associative
+    13. Multiplicative (*, /, %) - left-associative
+    14. Unary (!, ~, ++, --, +, -) - right-associative
+    15. Postfix ([], ++, --) - left-associative
+    16. Primary (ID, NUMBER, ())
+    """
+
+    # Token type constants
+    ASSIGNMENT_OPS = {'=', '+=', '-=', '*=', '/=', '%=', '<<=', '>>=', '&=', '^=', '|='}
+    UNARY_OPS = {'!', '~', '++', '--', '+', '-'}
+    POSTFIX_OPS = {'++', '--'}
+
+    def __init__(self, tokens: List[Token]):
+        """Initialize parser with a list of tokens from lexer."""
+        self.tokens = tokens
+        self.pos = 0
+
+    def _current_token(self) -> Optional[Token]:
+        """Return the current token without advancing."""
+        if self.pos < len(self.tokens):
+            return self.tokens[self.pos]
+        return None
+
+    def _peek_token(self, offset: int = 1) -> Optional[Token]:
+        """Peek at token at current position + offset."""
+        pos = self.pos + offset
+        if pos < len(self.tokens):
+            return self.tokens[pos]
+        return None
+
+    def _advance(self) -> Optional[Token]:
+        """Consume and return current token, then move to next."""
+        tok = self._current_token()
+        if tok is not None:
+            self.pos += 1
+        return tok
+
+    def _match(self, *expected_types) -> bool:
+        """Check if current token type matches any of expected_types."""
+        tok = self._current_token()
+        if tok is None:
+            return False
+        return tok.type in expected_types
+
+    def _expect(self, expected_type: str) -> Token:
+        """Consume a token of expected type, raise SyntaxError if mismatch."""
+        tok = self._current_token()
+        if tok is None:
+            raise SyntaxError(f"Unexpected end of input, expected {expected_type!r}")
+        if tok.type != expected_type:
+            raise SyntaxError(
+                f"Expected {expected_type!r}, got {tok.type!r} ({tok.value!r}) "
+                f"at line {tok.line}, column {tok.column}"
+            )
+        self._advance()
+        return tok
+
+    def _error(self, message: str) -> None:
+        """Raise a SyntaxError with current token info."""
+        tok = self._current_token()
+        if tok:
+            raise SyntaxError(f"{message} at line {tok.line}, column {tok.column}")
+        raise SyntaxError(f"{message} at end of input")
+
+    # ===== PARSING METHODS (from Primary to Comma) =====
+
+    def primary(self):
+        """
+        Primary level: handles ID, NUMBER, and parenthesized expressions.
+        """
+        tok = self._current_token()
+        if tok is None:
+            self._error("Unexpected end of input in primary expression")
+
+        if tok.type == 'ID':
+            tok = self._advance()
+            return primary_id(tok.value)
+
+        if tok.type == 'NUMBER':
+            tok = self._advance()
+            return primary_number(tok.value)
+
+        if tok.type == '(':
+            self._advance()  # consume '('
+            expr = self.comma()  # parse the full expression inside parentheses
+            self._expect(')')
+            return expr
+
+        self._error(f"Unexpected token {tok.type!r} in primary expression")
+
+    def postfix(self):
+        """
+        Postfix level: handles array subscript ([]), post-increment (++), post-decrement (--).
+        Left-associative (uses while loop).
+        """
+        expr = self.primary()
+
+        while True:
+            tok = self._current_token()
+            if tok is None:
+                break
+
+            if tok.type == '[':
+                self._advance()  # consume '['
+                index_expr = self.comma()  # allow full expressions in subscripts
+                self._expect(']')
+                expr = subscript_op(expr, index_expr)
+
+            elif tok.type in self.POSTFIX_OPS:
+                op = tok.type
+                self._advance()
+                expr = unary_op(f"post{op}", expr)  # e.g., 'post++', 'post--'
+
+            else:
+                break
+
+        return expr
+
+    def unary(self):
+        """
+        Unary level: handles prefix operators (!, ~, ++, --, unary +, unary -).
+        Right-associative (uses recursion).
+        """
+        tok = self._current_token()
+        if tok is not None and tok.type in self.UNARY_OPS:
+            op = tok.type
+            self._advance()
+            operand = self.unary()  # recursive call for right-associativity
+            return unary_op(op, operand)
+
+        return self.postfix()
+
+    def multiplicative(self):
+        """
+        Multiplicative level: *, /, %
+        Left-associative (uses while loop).
+        """
+        expr = self.unary()
+
+        while self._match('*', '/', '%'):
+            op = self._advance().type
+            right = self.unary()
+            expr = binary_op(op, expr, right)
+
+        return expr
+
+    def additive(self):
+        """
+        Additive level: +, -
+        Left-associative (uses while loop).
+        """
+        expr = self.multiplicative()
+
+        while self._match('+', '-'):
+            op = self._advance().type
+            right = self.multiplicative()
+            expr = binary_op(op, expr, right)
+
+        return expr
+
+    def shift(self):
+        """
+        Shift level: <<, >>
+        Left-associative (uses while loop).
+        """
+        expr = self.additive()
+
+        while self._match('<<', '>>'):
+            op = self._advance().type
+            right = self.additive()
+            expr = binary_op(op, expr, right)
+
+        return expr
+
+    def relational(self):
+        """
+        Relational level: <, <=, >, >=
+        Left-associative (uses while loop).
+        """
+        expr = self.shift()
+
+        while self._match('<', '<=', '>', '>='):
+            op = self._advance().type
+            right = self.shift()
+            expr = binary_op(op, expr, right)
+
+        return expr
+
+    def equality(self):
+        """
+        Equality level: ==, !=
+        Left-associative (uses while loop).
+        """
+        expr = self.relational()
+
+        while self._match('==', '!='):
+            op = self._advance().type
+            right = self.relational()
+            expr = binary_op(op, expr, right)
+
+        return expr
+
+    def bitwise_and(self):
+        """
+        Bitwise AND level: &
+        Left-associative (uses while loop).
+        """
+        expr = self.equality()
+
+        while self._match('&'):
+            op = self._advance().type
+            right = self.equality()
+            expr = binary_op(op, expr, right)
+
+        return expr
+
+    def bitwise_xor(self):
+        """
+        Bitwise XOR level: ^
+        Left-associative (uses while loop).
+        """
+        expr = self.bitwise_and()
+
+        while self._match('^'):
+            op = self._advance().type
+            right = self.bitwise_and()
+            expr = binary_op(op, expr, right)
+
+        return expr
+
+    def bitwise_or(self):
+        """
+        Bitwise OR level: |
+        Left-associative (uses while loop).
+        """
+        expr = self.bitwise_xor()
+
+        while self._match('|'):
+            op = self._advance().type
+            right = self.bitwise_xor()
+            expr = binary_op(op, expr, right)
+
+        return expr
+
+    def logical_and(self):
+        """
+        Logical AND level: &&
+        Left-associative (uses while loop).
+        """
+        expr = self.bitwise_or()
+
+        while self._match('&&'):
+            op = self._advance().type
+            right = self.bitwise_or()
+            expr = binary_op(op, expr, right)
+
+        return expr
+
+    def logical_or(self):
+        """
+        Logical OR level: ||
+        Left-associative (uses while loop).
+        """
+        expr = self.logical_and()
+
+        while self._match('||'):
+            op = self._advance().type
+            right = self.logical_and()
+            expr = binary_op(op, expr, right)
+
+        return expr
+
+    def conditional(self):
+        """
+        Conditional level: ? :
+        Right-associative (uses recursion).
+        
+        C standard: logical-or-expression ? expression : conditional-expression
+        
+        CRITICAL FIX: The middle expression (between '?' and ':') must be able to
+        include commas and assignments. We parse it by:
+        1. Starting with assignment()
+        2. Manually handling commas in a loop until we hit ':'
+        
+        This allows expressions like: a > 5 ? b += 5, b : c
+        """
+        expr = self.logical_or()
+
+        if self._match('?'):
+            self._advance()  # consume '?'
+            
+            # Parse middle expression with manual comma handling
+            # This is like comma() but bounded by ':'
+            true_branch = self.assignment()
+            while self._match(','):
+                self._advance()  # consume ','
+                right = self.assignment()
+                true_branch = binary_op(',', true_branch, right)
+            
+            self._expect(':')
+            false_branch = self.conditional()  # right-associative: recursive call
+            expr = conditional_op(expr, true_branch, false_branch)
+
+        return expr
+
+    def assignment(self):
+        """
+        Assignment level: =, +=, -=, *=, /=, %=, <<=, >>=, &=, ^=, |=
+        Right-associative (uses recursion).
+        """
+        expr = self.conditional()
+
+        if self._match(*self.ASSIGNMENT_OPS):
+            op = self._advance().type
+            value = self.assignment()  # right-associative: recursive call
+            expr = assign_op(op, expr, value)
+
+        return expr
+
+    def comma(self):
+        """
+        Comma level (lowest precedence): ,
+        Left-associative (uses while loop).
+        """
+        expr = self.assignment()
+
+        while self._match(','):
+            self._advance()  # consume ','
+            right = self.assignment()
+            expr = binary_op(',', expr, right)
+
+        return expr
+
+    def _parse_conditional_middle(self):
+        """
+        Special helper for parsing the middle expression in conditional.
+        This handles the expression between '?' and ':' which can include
+        commas and assignments.
+        
+        Returns to conditional() to maintain proper recursion bounds.
+        """
+        return self.assignment()  # Start at assignment, commas handled by loop detection
+
+    def parse(self):
+        """
+        Main entry point: parse the entire expression and return the AST root.
+        """
+        if self.pos >= len(self.tokens):
+            self._error("Empty input")
+
+        ast = self.comma()
+
+        # Optional: check that all tokens are consumed
+        if self._current_token() is not None:
+            self._error(f"Unexpected token after expression: {self._current_token().type!r}")
+
+        return ast
+
+
+def ast_to_string(node, indent=0):
+    """Pretty-print AST for debugging."""
+    if isinstance(node, str):
+        return ' ' * indent + repr(node)
+
+    if not isinstance(node, tuple):
+        return ' ' * indent + repr(node)
+
+    if len(node) == 2:
+        node_type, value = node
+        return ' ' * indent + f"{node_type}({repr(value)})"
+
+    node_type = node[0]
+
+    if node_type == 'BINARY':
+        _, op, left, right = node
+        result = ' ' * indent + f"BINARY({op!r}\n"
+        result += ast_to_string(left, indent + 2) + "\n"
+        result += ast_to_string(right, indent + 2) + "\n"
+        result += ' ' * indent + ")"
+        return result
+
+    elif node_type == 'UNARY':
+        _, op, operand = node
+        result = ' ' * indent + f"UNARY({op!r}\n"
+        result += ast_to_string(operand, indent + 2) + "\n"
+        result += ' ' * indent + ")"
+        return result
+
+    elif node_type == 'ASSIGN':
+        _, op, target, value = node
+        result = ' ' * indent + f"ASSIGN({op!r}\n"
+        result += ast_to_string(target, indent + 2) + "\n"
+        result += ast_to_string(value, indent + 2) + "\n"
+        result += ' ' * indent + ")"
+        return result
+
+    elif node_type == 'CONDITIONAL':
+        _, cond, true_br, false_br = node
+        result = ' ' * indent + "CONDITIONAL(\n"
+        result += ast_to_string(cond, indent + 2) + "\n"
+        result += ast_to_string(true_br, indent + 2) + "\n"
+        result += ast_to_string(false_br, indent + 2) + "\n"
+        result += ' ' * indent + ")"
+        return result
+
+    elif node_type == 'SUBSCRIPT':
+        _, array_ref, index = node
+        result = ' ' * indent + f"SUBSCRIPT(\n"
+        result += ast_to_string(array_ref, indent + 2) + "\n"
+        result += ast_to_string(index, indent + 2) + "\n"
+        result += ' ' * indent + ")"
+        return result
+
+    # Default fallback
+    return ' ' * indent + repr(node)
+
+
+if __name__ == '__main__':
+    import sys
+
+    # Sample expressions to parse
+    test_expressions = [
+        "a + b * c",
+        "a = b + 1",
+        "a < b && c != d",
+        "(a + b) * (c - d)",
+        "a ? b : c",
+        "arr[i++] = x--",
+        "a += b *= c",
+        "!a && b || c",
+        "a & b | c ^ d",
+        "a << 2 >> 1",
+    ]
+
+    print("=" * 60)
+    print("C Expression Parser - AST Generation Test")
+    print("=" * 60)
+
+    for expr_str in test_expressions:
+        print(f"\nParsing: {expr_str}")
+        print("-" * 40)
+        try:
+            # Tokenize
+            lexer = CLexer()
+            lexer.text = expr_str
+            lexer._build_regex()
+            tokens = list(lexer.tokenize())
+
+            # Parse
+            parser = CExpressionParser(tokens)
+            ast = parser.parse()
+
+            # Print AST
+            print("AST:")
+            print(ast_to_string(ast))
+        except Exception as e:
+            print(f"Error: {e}")
+
+    print("\n" + "=" * 60)

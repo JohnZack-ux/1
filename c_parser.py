@@ -28,6 +28,27 @@ def primary_id(name: str):
 def primary_number(value: str):
     return ('NUMBER', value)
 
+def block_stmt(statements):
+    """Create a block statement containing a list of statements."""
+    return ('BLOCK', statements)
+
+def declaration_stmt(type_name: str, declarators):
+    """Create a declaration statement with type and list of declarators.
+    
+    declarators is a list of tuples:
+    - ('ID', name): simple declaration like 'int a;'
+    - ('INIT', name, init_expr): declaration with initialization like 'int a = 10;'
+    """
+    return ('DECLARATION', type_name, declarators)
+
+def expression_stmt(expr):
+    """Create an expression statement."""
+    return ('EXPRESSION_STMT', expr)
+
+def empty_stmt():
+    """Create an empty statement (just a semicolon)."""
+    return ('EMPTY_STMT',)
+
 
 class CExpressionParser:
     """
@@ -390,18 +411,104 @@ class CExpressionParser:
 
     def parse(self):
         """
-        Main entry point: parse the entire expression and return the AST root.
+        Main entry point: parse the entire program and return the AST root.
+        Now supports multiple statements (declarations and expressions).
         """
-        if self.pos >= len(self.tokens):
-            self._error("Empty input")
+        return self.program()
 
-        ast = self.comma()
+    def program(self):
+        """
+        program -> { statement }
+        Parse a sequence of statements and return a BLOCK node.
+        """
+        statements = []
+        
+        # Parse statements until end of input
+        while self._current_token() is not None:
+            stmt = self.statement()
+            if stmt is not None:
+                statements.append(stmt)
+        
+        # Return a BLOCK containing all statements
+        return block_stmt(statements)
 
-        # Optional: check that all tokens are consumed
-        if self._current_token() is not None:
-            self._error(f"Unexpected token after expression: {self._current_token().type!r}")
+    def statement(self):
+        """
+        statement -> declaration | expression_stmt
+        
+        Check if next token is a type keyword (int, float, char, etc.)
+        to distinguish declaration from expression statement.
+        """
+        tok = self._current_token()
+        if tok is None:
+            return None
+        
+        # Check for type keyword
+        if tok.type == 'KEYWORD' and tok.value in {'int', 'float', 'char', 'void', 'double', 'long', 'short', 'signed', 'unsigned'}:
+            return self.declaration()
+        else:
+            return self.expression_stmt()
 
-        return ast
+    def declaration(self):
+        """
+        declaration -> type_keyword ID [ = expression ] { , ID [ = expression ] } ;
+        
+        Examples:
+        - int a;
+        - int a = 10;
+        - int a, b = 5, c;
+        - float x = 3.14;
+        """
+        # Get the type keyword
+        type_tok = self._expect('KEYWORD')
+        type_name = type_tok.value
+        
+        # Parse declarators (one or more)
+        declarators = []
+        
+        while True:
+            # Expect an ID
+            id_tok = self._expect('ID')
+            id_name = id_tok.value
+            
+            # Check for initialization
+            if self._match('='):
+                self._advance()  # consume '='
+                init_expr = self.assignment()  # parse the initialization expression
+                declarators.append(('INIT', id_name, init_expr))
+            else:
+                declarators.append(('ID', id_name))
+            
+            # Check for more declarators (comma-separated)
+            if self._match(','):
+                self._advance()  # consume ','
+                continue
+            else:
+                break
+        
+        # Expect semicolon at end of declaration
+        self._expect(';')
+        
+        return declaration_stmt(type_name, declarators)
+
+    def expression_stmt(self):
+        """
+        expression_stmt -> [ expression ] ;
+        
+        Allows empty statements (just ';') and expression statements.
+        """
+        # Check for empty statement
+        if self._match(';'):
+            self._advance()  # consume ';'
+            return empty_stmt()
+        
+        # Parse expression
+        expr = self.comma()
+        
+        # Expect semicolon
+        self._expect(';')
+        
+        return expression_stmt(expr)
 
 
 def ast_to_string(node, indent=0):
@@ -412,12 +519,34 @@ def ast_to_string(node, indent=0):
     if not isinstance(node, tuple):
         return ' ' * indent + repr(node)
 
-    if len(node) == 2:
-        node_type, value = node
-        return ' ' * indent + f"{node_type}({repr(value)})"
+    if len(node) == 0:
+        return ' ' * indent + "(...)"
 
     node_type = node[0]
 
+    # Handle 2-element nodes (simple value nodes)
+    if len(node) == 2:
+        if node_type == 'ID':
+            return ' ' * indent + f"ID({repr(node[1])})"
+        elif node_type == 'NUMBER':
+            return ' ' * indent + f"NUMBER({repr(node[1])})"
+        elif node_type == 'EMPTY_STMT':
+            return ' ' * indent + "EMPTY_STMT"
+        elif node_type == 'EXPRESSION_STMT':
+            result = ' ' * indent + "EXPRESSION_STMT(\n"
+            result += ast_to_string(node[1], indent + 2) + "\n"
+            result += ' ' * indent + ")"
+            return result
+        elif node_type == 'BLOCK':
+            result = ' ' * indent + "BLOCK[\n"
+            for stmt in node[1]:
+                result += ast_to_string(stmt, indent + 2) + "\n"
+            result += ' ' * indent + "]"
+            return result
+        else:
+            return ' ' * indent + repr(node)
+
+    # Handle BINARY nodes
     if node_type == 'BINARY':
         _, op, left, right = node
         result = ' ' * indent + f"BINARY({op!r}\n"
@@ -426,6 +555,7 @@ def ast_to_string(node, indent=0):
         result += ' ' * indent + ")"
         return result
 
+    # Handle UNARY nodes
     elif node_type == 'UNARY':
         _, op, operand = node
         result = ' ' * indent + f"UNARY({op!r}\n"
@@ -433,6 +563,7 @@ def ast_to_string(node, indent=0):
         result += ' ' * indent + ")"
         return result
 
+    # Handle ASSIGN nodes
     elif node_type == 'ASSIGN':
         _, op, target, value = node
         result = ' ' * indent + f"ASSIGN({op!r}\n"
@@ -441,6 +572,7 @@ def ast_to_string(node, indent=0):
         result += ' ' * indent + ")"
         return result
 
+    # Handle CONDITIONAL nodes
     elif node_type == 'CONDITIONAL':
         _, cond, true_br, false_br = node
         result = ' ' * indent + "CONDITIONAL(\n"
@@ -450,11 +582,26 @@ def ast_to_string(node, indent=0):
         result += ' ' * indent + ")"
         return result
 
+    # Handle SUBSCRIPT nodes
     elif node_type == 'SUBSCRIPT':
         _, array_ref, index = node
         result = ' ' * indent + f"SUBSCRIPT(\n"
         result += ast_to_string(array_ref, indent + 2) + "\n"
         result += ast_to_string(index, indent + 2) + "\n"
+        result += ' ' * indent + ")"
+        return result
+
+    # Handle DECLARATION nodes
+    elif node_type == 'DECLARATION':
+        _, type_name, declarators = node
+        result = ' ' * indent + f"DECLARATION({type_name!r}\n"
+        for decl in declarators:
+            if decl[0] == 'ID':
+                result += ' ' * (indent + 2) + f"ID({repr(decl[1])})\n"
+            elif decl[0] == 'INIT':
+                result += ' ' * (indent + 2) + f"INIT({repr(decl[1])}\n"
+                result += ast_to_string(decl[2], indent + 4) + "\n"
+                result += ' ' * (indent + 2) + ")\n"
         result += ' ' * indent + ")"
         return result
 
@@ -465,31 +612,32 @@ def ast_to_string(node, indent=0):
 if __name__ == '__main__':
     import sys
 
-    # Sample expressions to parse
-    test_expressions = [
-        "a + b * c",
-        "a = b + 1",
-        "a < b && c != d",
-        "(a + b) * (c - d)",
-        "a ? b : c",
-        "arr[i++] = x--",
-        "a += b *= c",
-        "!a && b || c",
-        "a & b | c ^ d",
-        "a << 2 >> 1",
+    # Sample statements and declarations to parse
+    test_statements = [
+        "int a;",
+        "int a = 10;",
+        "int a = 10, b;",
+        "int x = 5, y = 20, z;",
+        "float pi = 3.14;",
+        "a++;",
+        "a = b + 1;",
+        ";",
+        "int a = 10; a++;",
+        "int x; int y = 10; x = y + 5;",
+        "int a, b = 5; a = b * 2; a++;",
     ]
 
-    print("=" * 60)
-    print("C Expression Parser - AST Generation Test")
-    print("=" * 60)
+    print("=" * 70)
+    print("C Statement Parser - AST Generation Test (with Declarations)")
+    print("=" * 70)
 
-    for expr_str in test_expressions:
-        print(f"\nParsing: {expr_str}")
-        print("-" * 40)
+    for stmt_str in test_statements:
+        print(f"\nParsing: {stmt_str}")
+        print("-" * 70)
         try:
             # Tokenize
             lexer = CLexer()
-            lexer.text = expr_str
+            lexer.text = stmt_str
             lexer._build_regex()
             tokens = list(lexer.tokenize())
 
@@ -503,4 +651,4 @@ if __name__ == '__main__':
         except Exception as e:
             print(f"Error: {e}")
 
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 70)

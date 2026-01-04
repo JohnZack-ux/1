@@ -29,10 +29,11 @@ class CInterpreter:
         """
         Look up a variable in the symbol table.
         
-        Raises NameError if variable not found.
+        If variable not found, auto-declare it as int (value 0).
         """
         if name not in self.variables:
-            raise NameError(f"Undefined variable: {name!r}")
+            # Auto-declare undeclared variables as int with value 0
+            self.variables[name] = 0
         return self.variables[name]
 
     def _update(self, name: str, value):
@@ -65,11 +66,51 @@ class CInterpreter:
         - ('ASSIGN', op, target, value): assignment
         - ('CONDITIONAL', cond, true_branch, false_branch): ternary operator
         - ('SUBSCRIPT', array_ref, index): array subscript
+        - ('BLOCK', statements): block of statements
+        - ('DECLARATION', type_name, declarators): variable declaration
+        - ('EXPRESSION_STMT', expr): expression statement
+        - ('EMPTY_STMT',): empty statement
         """
-        if not isinstance(node, tuple) or len(node) < 2:
+        if not isinstance(node, tuple) or len(node) < 1:
             raise TypeError(f"Invalid AST node: {node!r}")
 
         node_type = node[0]
+
+        # ===== Statement Nodes =====
+        if node_type == 'BLOCK':
+            """Execute a block of statements and return the value of the last statement."""
+            _, statements = node
+            result = 0
+            for stmt in statements:
+                result = self.evaluate(stmt)
+            return result
+
+        if node_type == 'DECLARATION':
+            """Process variable declarations."""
+            _, type_name, declarators = node
+            for decl in declarators:
+                if decl[0] == 'ID':
+                    # Simple declaration: int a;
+                    var_name = decl[1]
+                    # Initialize to 0 by default if not initialized
+                    if var_name not in self.variables:
+                        self.variables[var_name] = 0
+                elif decl[0] == 'INIT':
+                    # Declaration with initialization: int a = 10;
+                    var_name = decl[1]
+                    init_expr = decl[2]
+                    init_value = self.evaluate(init_expr)
+                    self.variables[var_name] = init_value
+            return 0
+
+        if node_type == 'EXPRESSION_STMT':
+            """Execute an expression statement."""
+            _, expr = node
+            return self.evaluate(expr)
+
+        if node_type == 'EMPTY_STMT':
+            """Empty statement (just ;)."""
+            return 0
 
         # ===== Primary Nodes =====
         if node_type == 'ID':
@@ -353,7 +394,8 @@ class CInterpreter:
 
     def run(self, ast):
         """
-        Evaluate the AST and return the final value.
+        Execute the AST (which is typically a BLOCK of statements).
+        Returns the value of the last statement executed.
         """
         return self.evaluate(ast)
 
@@ -364,56 +406,58 @@ if __name__ == '__main__':
     from c_lexer import CLexer
     from c_parser import CExpressionParser, ast_to_string
 
-    # Sample test cases with initial variables
+    # Test cases with declarations and multi-statement programs
     test_cases = [
-        ("a + b", {'a': 5, 'b': 3}),
-        ("a * 2 + b", {'a': 4, 'b': 10}),
-        ("a < b && b < c", {'a': 1, 'b': 5, 'c': 10}),
-        ("a = 10", {}),
-        ("a = 10; b = a + 5", {'a': 0}),
-        ("x = 5", {}),
-        ("y = ++x", {'x': 5}),
-        ("y = x++", {'x': 5}),
-        ("a = 8", {}),
-        ("b = a >>= 2", {'a': 8}),
-        ("a ? b : c", {'a': 1, 'b': 100, 'c': 200}),
-        ("flag = (a != 0) && (b >= 10) || !c", {'a': 5, 'b': 15, 'c': 0}),
+        ("int a = 10;", {}),
+        ("int a; a = 5;", {}),
+        ("int a = 5, b = 10; a = b + a;", {}),
+        ("int x; x = 10; x++;", {}),
+        ("int a = 1, b = 2, c; c = a + b; c = c * 2;", {}),
+        ("float f = 3.14; f = f + 1.0;", {}),
+        ("int flag = 1; int result = flag ? 100 : 200;", {}),
+        ("int a = 10; int b; a++; b = a;", {}),
     ]
 
     print("=" * 70)
-    print("C Expression Interpreter - Test Results")
+    print("C Interpreter - Multi-Statement Test Results")
     print("=" * 70)
 
-    for expr_str, init_vars in test_cases:
-        print(f"\nExpression: {expr_str}")
-        print(f"Initial variables: {init_vars}")
+    for prog_str, init_vars in test_cases:
+        print(f"\nProgram: {prog_str}")
         print("-" * 70)
 
         try:
             # Tokenize and parse
             lexer = CLexer()
-            lexer.text = expr_str
+            lexer.text = prog_str
             lexer._build_regex()
             tokens = list(lexer.tokenize())
 
             parser = CExpressionParser(tokens)
             ast = parser.parse()
 
+            # Print AST
+            print("AST:")
+            print(ast_to_string(ast))
+            print()
+
             # Interpret
             interpreter = CInterpreter(init_vars.copy())
             result = interpreter.run(ast)
 
-            print(f"Result: {result}")
+            print(f"Program result: {result}")
             
             # Print variables in alphabetical order
             if interpreter.variables:
                 print("变量最终状态:")
                 for var_name in sorted(interpreter.variables.keys()):
-                    print(f"{var_name}={interpreter.variables[var_name]}")
+                    print(f"  {var_name} = {interpreter.variables[var_name]}")
             else:
                 print("变量最终状态: (empty)")
 
         except Exception as e:
             print(f"Error: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
 
     print("\n" + "=" * 70)

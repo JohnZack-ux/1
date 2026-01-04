@@ -26,12 +26,15 @@ class CLexer:
         self._build_regex()
 
     def _build_regex(self) -> None:
+        # Keywords: int, float, char, void, etc.
+        keywords = {'int', 'float', 'char', 'void', 'double', 'long', 'short', 'signed', 'unsigned'}
+        
         # Operators and punctuators: list with multi-char tokens first for greedy matching
         ops = [
             '<<=', '>>=', '->', '++', '--', '<<', '>>', '<=', '>=', '==', '!=',
             '&&', '||', '+=', '-=', '*=', '/=', '%=', '&=', '^=', '|=',
             '+', '-', '*', '/', '%', '<', '>', '!', '~', '|', '^', '&', '=',
-            '?', ':', ',', '[', ']', '(', ')', ';'
+            '?', ':', ',', '[', ']', '(', ')', ';', '{', '}'
         ]
         # Sort by length descending to ensure greedy matching (longer first)
         ops_sorted = sorted(ops, key=lambda s: -len(s))
@@ -43,6 +46,7 @@ class CLexer:
             ('WHITESPACE', r'\s+'),
             ('COMMENT', r'//[^\n]*|/\*.*?\*/'),
             ('NUMBER', r'0x[0-9A-Fa-f]+|\d+(?:\.\d*)?(?:[eE][+-]?\d+)?'),
+            ('KEYWORD', r'\b(' + '|'.join(keywords) + r')\b'),
             ('ID', r'[A-Za-z_][A-Za-z0-9_]*'),
             ('OP', op_pattern),
             ('MISMATCH', r'.'),
